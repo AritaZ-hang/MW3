@@ -1,6 +1,6 @@
 # MW3
-This is the code repository for the bioinformatical analyses used in MW3 project. 
-TODO: Files will be organized into seperate folders. 
+This is the code repository for the bioinformatic analyses used in MW3 project.
+To-do: Files will be organized into separate folders.
 ## To merge beads
 Pipeline are adapted from bap2.
 1. Jaccard_pipeline.R
