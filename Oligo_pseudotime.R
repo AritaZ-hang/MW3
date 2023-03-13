@@ -15,46 +15,72 @@ library(FNN)
 setwd('YOURWORKDIR')
 
 ## STEP 01: Build imputed matrix for scATAC-seq data ##
-## We've done this by intergating it with scRNA-seq data using Signac
+## We've done this by intergating it with scRNA-seq data using Seurat's FindTransferAnchors function
 oligo_atac = readRDS('oligo_atac.rds')
 oligo_rna = readRDS('oligo_rna.rds')
 oligo_cds = readRDS('oligo_cds.rds') # obtained by Monocle2
+rna_counts = GetAssayData(oligo_rna, slot = 'counts')
 
 oligo_geneScore = getMatrixFromProject(oligo_atac, useMatrix = 'GeneScoreMatrix')
 oligo_geneMat = oligo_geneScore@assays@data@listData[["GeneScoreMatrix"]]
 rownames(oligo_geneMat) = oligo_geneScore@elementMetadata@listData[["name"]]
 
-## Standard workflow as Signac recommends.
-assay = CreateChromatinAssay(counts = oligo_mat, sep = c('_', '_'))
-oligo_seurat = CreateSeuratObject(counts = assay, assay = 'peaks',project = 'ATAC')
+genes_intersect = intersect(rownames(oligo_geneMat), rownames(oligo_rna))
 
-oligo_seurat = RunTFIDF(oligo_seurat)
-oligo_seurat = FindTopFeatures(oligo_seurat, min.cutoff = 'q0')
-oligo_seurat = RunSVD(object = oligo_seurat)
-oligo_seurat = RunUMAP(object = oligo_seurat,reduction = 'lsi',dims = 2:30)
-oligo_seurat = FindNeighbors(object = oligo_seurat,reduction = 'lsi',dims = 2:30)
-oligo_seurat = FindClusters(object = oligo_seurat,algorithm = 3,resolution = 1,verbose = FALSE)
+oligo_geneMat = oligo_geneMat[genes_intersect,]
+oligo_rna = oligo_rna[genes_intersect,]
 
-oligo_seurat[['activity']] = CreateAssayObject(counts = oligo_geneMat)
-DefaultAssay(oligo_seurat) = 'activity'
-oligo_seurat = ScaleData(oligo_seurat, features = rownames(oligo_seurat))
+######################### Deal with gene scores ###################################
+if(T)
+{
+  oligo_seurat = CreateSeuratObject(counts = oligo_geneMat, min.cells = 3,project = "oligo")
+  oligo_seurat@assays$RNA@data = oligo_seurat@assays$RNA@counts
+  oligo_seurat = NormalizeData(object = oligo_seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+  oligo_seurat = FindVariableFeatures(object = oligo_seurat, mean.function = ExpMean, dispersion.function = LogVMR)
+  hv.genes.atac= head(VariableFeatures(oligo_seurat),2000)
+  oligo_seurat = ScaleData(object = oligo_seurat,features = hv.genes.atac, vars.to.regress = c("nCount_RNA"))
+  oligo_seurat = RunPCA(object = oligo_seurat, pc.genes = hv.genes.atac, pcs.compute = 100, do.print = TRUE, pcs.print = 1:5, genes.print = 5)
+  ElbowPlot(object =oligo_seurat, ndims = 50)
+  
+  oligo_seurat = FindNeighbors(oligo_seurat,dims=1:50)
+  oligo_seurat = FindClusters(oligo_seurat, resolution = 1)
+  oligo_seurat = RunUMAP(object = oligo_seurat, reduction = "pca", dims= 1:50, reduction.name = "umap") 
+}
 
-transfer.anchors.oligo = FindTransferAnchors(reference = oligo_rna, query = oligo_seurat, reference.assay = 'RNA', query.assay = 'activity',reduction = 'cca', k.anchor = 20, features = VariableFeatures(oligo_rna))
+all.hv_genes = unique(c(VariableFeatures(oligo_seurat), VariableFeatures(oligo_rna)))
+
+transfer.anchors.oligo = FindTransferAnchors(reference = oligo_rna, query = oligo_seurat, reference.assay = 'RNA', query.assay = 'RNA',reduction = 'cca', k.anchor = 30, features = all.hv_genes, npcs = 50)
 
 ## STEP 02: Mapping ATAC cells with neighbor RNA cells in the common CCA space by FNN ## 
 
 ImputeCoembed = function(rna_object, atac_object, transfer.anchors)
 {
-  genes.use = VariableFeatures(rna_object)
+  genes.use = transfer.anchors@anchor.features
   refdata = GetAssayData(rna_object, assay = 'RNA', slot = 'data')[genes.use,]
-  imputation = TransferData(transfer.anchors, refdata, weight.reduction = atac_object[['lsi']], dims = 2:30)
-  atac_object[['RNA']] = imputation
-  DefaultAssay(atac_object) = 'RNA'
+  imputation = TransferData(transfer.anchors, refdata, weight.reduction = 'cca', l2.norm = T)
   refdata.matrix = t(as.matrix(refdata))
   imputation.matrix = GetAssayData(imputation, slot = 'data')
   imputation.matrix = t(as.matrix(imputation.matrix))
+  
   return(list(refdata.matrix, imputation.matrix))
   
+}
+sampleNearestNeighbors = function(cell, knn_object, N = 30, output = 'indices')
+{
+  if(output == 'indices')
+  {
+    cells = as.integer(as.data.frame(knn_object[['nn.index']])[cell,])
+  }
+  else
+  {
+    cells = as.integer(as.data.frame(knn_object[['nn.cells']])[cell,])
+  }
+  dists = as.double(as.data.frame(knn_object[['nn.dist']])[cell,])
+  prob_fun = eval(parse(text = "(1/exp(dists)) * (1/sum(1/exp(dists)))"))
+  sample(x = cells,
+         size = N,
+         replace = F,
+         prob = prob_fun)
 }
 FnnMatching = function(impute.ref, kn = 50, random = 20)
 {
@@ -86,7 +112,7 @@ FnnMatching = function(impute.ref, kn = 50, random = 20)
   return(final.index)
 }
 oligo.impute.ref = ImputeCoembed(oligo_rna, oligo_seurat, transfer.anchors.oligo)
-oligo_matching_df = FnnMatching(oligo.impute.ref, 100, 100)
+oligo_matching_df = FnnMatching(oligo.impute.ref, 100, 50)
 oligo_matching_df$atac_cells = rownames(oligo_matching_df)
 
 ## STEP 03: Compute average Pseudotime ##
@@ -107,25 +133,15 @@ MeanPseudotime = function(matching_df, rna_pseudotime, random = 20)
   return(atac_pseudotime)
 }
 
-oligo_atac_pseudotime = MeanPseudotime(oligo_matching_df, oligo_rna_pseudotime, random = 100)
+oligo_atac_pseudotime = MeanPseudotime(oligo_matching_df, oligo_rna_pseudotime, random = 50)
 
-## STEP 03: sampling cells ##
-
-fnx = ecdf(oligo_atac_pseudotime$atac_pseudotime)
-t1 = fnx(oligo_atac_pseudotime$atac_pseudotime)
-sub_cells = sample(rownames(oligo_atac_pseudotime), size = 100, replace = F, prob = 1/t1 * (1/sum(1/exp(t1))))
-sample.atac = as.data.frame(oligo_atac_pseudotime[sub.cells,])
-rownames(sample.atac) = test; names(sample.atac) = 'atac_pseudotime'
-new_match_df = oligo_matching_df[sub_cells,]
-rna_counts = GetAssayData(oligo_b, slot = 'counts')
-
-## STEP 04: Build corresponding pseudobulks for scRNA-seq data ## 
+## STEP 03: Build corresponding pseudobulks for scRNA-seq data ## 
 BuildPseudobulk = function(matching_df, counts)
 {
   sum = c()
   for(i in 1:dim(matching_df)[1])
   {
-    cells_to_use = as.character(matching_df[i, 1:20])
+    cells_to_use = as.character(matching_df[i, 1:50])
     tmp_counts = counts[, cells_to_use]
     tmp = as.vector(Matrix::rowSums(tmp_counts))
     sum = cbind(sum, tmp)
@@ -137,10 +153,9 @@ BuildPseudobulk = function(matching_df, counts)
 }
 
 rna_pseudobulk = BuildPseudobulk(new_match_df, rna_counts)
-rna_pseudobulk_pseudotime = MeanPseudotime(new_match_df, oligo_rna_pseudotime, random = 100)
-names(rna_pseudobulk_pseudotime) = 'rna_pseudobulk_pseudotime'
+rna_pseudobulk_pseudotime = MeanPseudotime(new_match_df, oligo_rna_pseudotime, random = 50)
+names(rna_pseudobulk_pseudotime) = 'pseudotime'
+rownames(rna_pseudobulk_pseudotime) = paste0('Pseudobulk_', 1:length(cells_needed))
 
-save(sample.atac, rna_pseudobulk, rna_pseudobulk_pseudotime, file = 'oligo_rna_pseudobulk_100.RData')
-saveRDS(oligo_atac_pseudotime, file = 'oligo_fnn_pseudotime_100.rds')
-
-save.image(file = 'oligo_fnn_mapping_100.RData')
+save(rna_pseudobulk, rna_pseudobulk_pseudotime, file = 'oligo_rna_pseudobulk.RData')
+saveRDS(oligo_atac_pseudotime, file = 'oligo_fnn_pseudotime.rds')
