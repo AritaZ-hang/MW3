@@ -3,11 +3,18 @@
 #!/bin/bash
 
 reference=~/Mus_musculus.GRCm38.88.fasta
-name=lung_wt_tumor
+name=lung_wt_tumor_100wbin_pseudobulks
+
 cd `pwd`
 
+## sort and index
+samtools sort -o $name"_sorted.bam" $name".bam"
+samtools index $name"_sorted.bam"
+
 # bcftools vcf calling
-bcftools mpileup -Ou -f $reference lung_wt_tumor.bam | bcftools call -vm -Oz > "./"$name".vcf.gz"
+bcftools mpileup -Ou -f $reference $name"_sorted.bam" | bcftools call -vm -Oz > "./"$name".vcf.gz"
+
+gunzip $name".vcf.gz"
 
 ## STEP 02  Divide the VCF file
 
@@ -16,7 +23,7 @@ bcftools mpileup -Ou -f $reference lung_wt_tumor.bam | bcftools call -vm -Oz > "
 cd `pwd`
 
 vcf_sep=~/vcf_sep.py
-tissue=lung_wt_tumor
+name=lung_wt_tumor_100wbin_pseudobulks
 outdir=~"/vcf"
 
 if [ ! -d $outdir]; then
@@ -37,14 +44,14 @@ if [ ! -d $outdir ]; then
     mkdir $outdir
 fi
 
-tissue=lung_wt_tumor
-tissue_bam=~/$tissue".bam"
-bclist=~/lung_bc.tsv
+name=lung_wt_tumor_100wbin_pseudobulks
+tissue_bam=~/$name"_sorted.bam"
+bclist=~/$name"_bc.tsv"
 vcf_path=~/vcf
 vartrix=~/vartrix
 reference=~/Mus_musculus.GRCm38.88.fasta
 
-## 
+## processing on the regular chromosomes of mus musculus
 for chr in {1..19};
 do
     mkdir chr/chr"$chr"_matrix
@@ -58,11 +65,11 @@ done
 #!/bin/bash
 
 cd `pwd`
-cbn=/public/home/guogjgroup/ggj/rawdata/ZS/scripts/CNV/Cbn_matrix.R
-samplename=lung_wt_tumor
+cbn=~/Cbn_matrix.R
+name=lung_wt_tumor_100wbin_pseudobulks
 
 dir_path=~/
 vcf_path=~/vcf
-bclist=~/lung_bc.tsv
+bclist=~/$name"_bc.tsv"
 
 Rscript $cbn $dir_path $vcf_path $bclist $samplename

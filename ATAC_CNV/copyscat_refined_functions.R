@@ -3,17 +3,33 @@
 ## 1. normalizeMatrixN
 normalizeMatrixN <- function(inputMatrix,logNorm=FALSE,maxZero=2000,imputeZeros=FALSE,blacklistProp=0.8, priorCount=1,blacklistCutoff=100,dividingFactor=1e6,upperFilterQuantile=0.95)
 {
+  if(F)
+  {
+    inputMatrix = scData
+    logNorm = FALSE
+    maxZero = 2000
+    imputeZeros = FALSE
+    blacklistProp = 0.8
+    priorCount = 1
+    blacklistCutoff = 500
+    dividingFactor = 1
+    upperFilterQuantile = 1
+  }
+  
+  
   sc_t<-data.table(t(inputMatrix))
   #sc_t
-  cellReads<-data.table::transpose(sc_t[,lapply(.SD,sum)],keep.names="Cell")
+  cellReads<-data.table::transpose(sc_t[,lapply(.SD,sum)],keep.names="Cell") ### 对于pseudocells来说 给Normalized肯定就没必要看了
   pdf(str_c(scCNVCaller$locPrefix,scCNVCaller$outPrefix,"_signal_distribution.pdf"),width=6,height=4)
-  hist(cellReads$V1, breaks=50,main=scCNVCaller$outPrefix,xlab = "Signal")
+  hist(cellReads$V1, breaks=500,main=scCNVCaller$outPrefix,xlab = "Signal")
   abline(v=quantile(cellReads$V1,upperFilterQuantile),col=c("red"),lty=2)
   dev.off()
   
   readsCells=cellReads[,mean(V1)]
+  
+  sc_t_bak =  sc_t
   #apply quantile filter
-  sc_t[,cellReads[cellReads[,V1>quantile(cellReads$V1,upperFilterQuantile)]]$Cell:=NULL]
+  sc_t[,cellReads[cellReads[,V1>quantile(cellReads$V1,upperFilterQuantile)]]$Cell:=NULL] ### 将那些读数比较高的RM了 真有你的
   nCells<-nrow(cellReads)
   print(str_c("Total number of starting cells: ",nCells," Average reads per cell: ",mean(readsCells)))
   scCNVCaller$meanReadsPerCell<-readsCells
@@ -34,17 +50,20 @@ normalizeMatrixN <- function(inputMatrix,logNorm=FALSE,maxZero=2000,imputeZeros=
     return(NULL)
   }
   sc_t2<-sc_t[which(sc_pos[,V1<blacklistPropCutoff]),lapply(.SD,function(x) as.numeric(x<blacklistCutoff))][,lapply(.SD,sum)]
-  print(sc_t[which(sc_pos[,V1<blacklistPropCutoff]),lapply(.SD,function(x) as.numeric(x<blacklistCutoff))][1:10,1:10])
-  #print(sc_t2[,1:100])
-  
-  sc_zeros<-data.table::transpose(sc_t2,keep.names="Cells")
-  #print(sc_zeros)
-  #zero_cutoff=zero_cutoff
-  zero_list<-sc_zeros[which(sc_zeros[,V1<maxZero])]$Cells
-  zero_list
-  #print(zero_list)
-  #zeros<-rownames_to_column(tmp1,var="Chrom") %>% dplyr::filter(!(Chrom %in% blacklistRegions$Chrom)) %>% summarise_if(is.numeric,funs(sum(.==0))) %>% gather(Cell,Value) %>% mutate(cellPass=(Value<maxZero))
-  scCNVCaller$cellsPassingFilter<-length(zero_list)
+  if(dim(sc_t2)[1] != 0)
+  {
+    print(sc_t[which(sc_pos[,V1<blacklistPropCutoff]),lapply(.SD,function(x) as.numeric(x<blacklistCutoff))][1:10,1:10])
+    #print(sc_t2[,1:100])
+    
+    sc_zeros<-data.table::transpose(sc_t2,keep.names="Cells")
+    #print(sc_zeros)
+    #zero_cutoff=zero_cutoff
+    zero_list<-sc_zeros[which(sc_zeros[,V1<maxZero])]$Cells
+    zero_list
+    #print(zero_list)
+    #zeros<-rownames_to_column(tmp1,var="Chrom") %>% dplyr::filter(!(Chrom %in% blacklistRegions$Chrom)) %>% summarise_if(is.numeric,funs(sum(.==0))) %>% gather(Cell,Value) %>% mutate(cellPass=(Value<maxZero))
+    scCNVCaller$cellsPassingFilter<-length(zero_list)
+  }
   print(str_c(scCNVCaller$cellsPassingFilter, " cells passing filter"))
   #get low confidence regions
   #message(blacklistRegions$Chrom)
@@ -81,11 +100,13 @@ normalizeMatrixN <- function(inputMatrix,logNorm=FALSE,maxZero=2000,imputeZeros=
 ## 2.collapseChrom3N
 collapseChrom3N<-function(inputMatrix,minimumSegments=40,summaryFunction=cutAverage,logTrans=FALSE,binExpand=1,minimumChromValue=2,tssEnrich=5,logBase=2,minCPG=300,powVal=0.73)
 {
+  
   #remove centromeric bins
   #these are ordered in the same fashion so should be accurate
   #divide signal by cpg density + 1 (To avoid dividing by zero)
   #remove blacklist regions
   # %>% dplyr::filter(cpg!=0)
+   
   scData_k_norm <- inputMatrix %>% mutate(chromArm=scCNVCaller$cytoband_data$V4,cpg=scCNVCaller$cpg_data$cpg_density) %>% mutate(chrom=str_c(chrom,chromArm)) %>% dplyr::filter(cpg>minCPG)
   if (binExpand>1)
   {
@@ -213,9 +234,11 @@ annotateCNV4 <- function(cnvResults,saveOutput=TRUE,maxClust2=4,outputSuffix="_1
 {
   ## cnvResults = candidate_cnvs_clean
   ## outputSuffix='_1'
-  ## sdCNV = 0.9
+  ## sdCNV = 0.5
   ## filterResults = FALSE
-  ## maxClust2 = 10
+  ## maxClust2 = 4
+  ## minAlteredCells=10
+  ## filterRange=0.8
   
   cell_assignments<-cnvResults[[1]]
   cell_assignments<-column_to_rownames(cell_assignments,var = "Cells")
@@ -274,9 +297,11 @@ annotateCNV4 <- function(cnvResults,saveOutput=TRUE,maxClust2=4,outputSuffix="_1
   {
     #identify chromosomes not used
     unused = cnvResults[[1]] %>% dplyr::filter(str_detect(Cells,"X",negate=TRUE)) %>% gather(chrom,cluster,starts_with("chr")) %>% group_by(chrom,cluster) %>% dplyr::filter(cluster!=0) %>% dplyr::summarise(num=n()) %>% group_by(chrom) %>% summarise(min=min(num)) %>% dplyr::filter(min<minAlteredCells)
-    # print(unused)
-    #print(trimmedCNV)
-    #print(trimmedCNV %in% unused$chrom)
+    
+    #unused_test = cnvResults[[1]] %>% dplyr::filter(str_detect(Cells,"X",negate=TRUE)) %>% gather(chrom,cluster,starts_with("chr")) %>% group_by(chrom,cluster) %>% dplyr::filter(cluster!=0) %>% dplyr::summarise(num=n()) %>% group_by(chrom)
+    print(unused)
+    print(trimmedCNV)
+    print(trimmedCNV %in% unused$chrom)
     trimmedCNV<-trimmedCNV[!(trimmedCNV %in% unused$chrom)]
     consensus_CNV_clusters<-rownames_to_column(cell_assignments) %>% dplyr::filter(str_detect(rowname,"X",negate=TRUE)) %>% gather(Chrom,clust,2:(ncol(cell_assignments)+1)) %>% dplyr::filter(Chrom %in% trimmedCNV) %>% spread(Chrom,clust) %>% arrange(rowname)
   }
